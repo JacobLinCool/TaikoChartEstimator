@@ -7,6 +7,12 @@ MIL-based Taiko chart difficulty estimator that predicts difficulty class and st
 - Transformer instance encoder, multi-branch or gated attention aggregator, monotonic spline/MLP calibrator
 - TensorBoard logging, curriculum scheduling, and HuggingFace checkpoints
 
+Our goals are simple:
+
+1. **Star-Level Granularity**: Move beyond traditional 1-10 integer star ratings to provide continuous sub-star difficulty scores (e.g., 9.3 vs 9.7), offering a more precise difficulty metric.
+2. **High-Difficulty Separation**: Address "10-star inflation" by accurately tiering top-level charts, distinguishing between entry-level 10-star songs and those that significantly exceed the nominal boundary.
+3. **Sectional Interpretability**: Provide section-by-section difficulty analysis to identify which specific segments contribute most to the overall rating, giving clear insights into the chart's complexity.
+
 ## Installation
 
 Install the project dependencies:
