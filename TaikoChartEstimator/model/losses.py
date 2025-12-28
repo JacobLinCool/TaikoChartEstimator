@@ -411,15 +411,13 @@ class CurriculumScheduler:
         Returns:
             Dict with lambda_cls, lambda_star, lambda_rank
         """
-        if step < self.warmup_steps:
-            # During warmup: interpolate from start to mid
-            t = step / self.warmup_steps
+        # Smooth interpolation over entire training
+        if self.total_steps > 0:
+            t = min(1.0, step / self.total_steps)
         else:
-            # After warmup: continue to end
-            t = (step - self.warmup_steps) / (self.total_steps - self.warmup_steps)
-            t = min(1.0, t)  # Clamp at 1
+            t = 1.0
 
-        # Linear interpolation
+        # Linear interpolation from start to end
         lambda_cls = self.cls_start + t * (self.cls_end - self.cls_start)
         lambda_rank = self.rank_start + t * (self.rank_end - self.rank_start)
         lambda_star = self.star_start + t * (self.star_end - self.star_start)
