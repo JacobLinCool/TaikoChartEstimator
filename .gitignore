@@ -184,3 +184,5 @@ cython_debug/
 runs/
 outputs/
 eval_results/
+
+/*.png
