@@ -21,7 +21,7 @@ from sklearn.metrics import (
     f1_score,
 )
 
-from ..constants import DIFFICULTY_ORDER, STAR_RANGES_BY_ID
+from ..constants import STAR_RANGES_BY_ID
 
 
 @dataclass

@@ -18,12 +18,10 @@ from typing import Optional
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from scipy.stats import spearmanr
 from sklearn.metrics import (
     balanced_accuracy_score,
-    confusion_matrix,
     f1_score,
     precision_score,
     recall_score,
