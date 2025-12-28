@@ -6,7 +6,10 @@ from typing import Any, Optional
 import gradio as gr
 import matplotlib.pyplot as plt
 import numpy as np
+import ruptures as rpt
 import torch
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 
 from TaikoChartEstimator.data.tokenizer import EventTokenizer
 from TaikoChartEstimator.model.model import TaikoChartEstimator
@@ -303,6 +306,8 @@ def _discover_checkpoints() -> list[str]:
         if os.path.isdir(p) and os.path.exists(os.path.join(p, "config.json")):
             paths.append(p)
     # Also accept HF / user-provided paths via manual input
+    if not paths:
+        return ["JacobLinCool/TaikoChartEstimator-20251228"]
     return sorted(paths)
 
 
@@ -497,6 +502,445 @@ def _plot_density_and_attention(
     return fig
 
 
+def _plot_local_difficulty(
+    times: list[tuple[float, float]],
+    local_stars: np.ndarray,
+    token_counts: list[int],
+    title: str,
+):
+    """Plot estimated local difficulty (star rating) over time."""
+    t0 = np.array([a for a, _ in times], dtype=np.float64)
+    t1 = np.array([b for _, b in times], dtype=np.float64)
+    mids = (t0 + t1) / 2.0
+    durations = np.maximum(t1 - t0, 1e-6)
+    token_counts_np = np.array(token_counts[: len(times)], dtype=np.float64)
+    density = token_counts_np / durations
+
+    order = np.argsort(mids)
+    mids_s = mids[order]
+    stars_s = local_stars[order]
+    dens_s = density[order]
+
+    # EMA Smoothing
+    # Alpha = 2 / (span + 1), for span=4 (approx 8-16s depending on window) -> alpha=0.4
+    alpha = 0.3
+    if len(stars_s) > 0:
+        stars_smooth = np.zeros_like(stars_s)
+        stars_smooth[0] = stars_s[0]
+        for i in range(1, len(stars_s)):
+            stars_smooth[i] = alpha * stars_s[i] + (1 - alpha) * stars_smooth[i - 1]
+    else:
+        stars_smooth = stars_s
+
+    fig, ax1 = plt.subplots(figsize=(10, 3.5))
+
+    # Plot difficulty curve
+    color = "tab:red"
+    ax1.set_xlabel("Time (s)")
+    ax1.set_ylabel("Estimated Local Stars", color=color)
+
+    # Plot raw faint
+    ax1.plot(mids_s, stars_s, color=color, linewidth=1, alpha=0.3, label="Raw")
+    # Plot smoothed main
+    ax1.plot(mids_s, stars_smooth, color=color, linewidth=2.5, label="Smoothed (EMA)")
+
+    ax1.tick_params(axis="y", labelcolor=color)
+    ax1.grid(True, alpha=0.25)
+
+    # Fill area under smoothed curve
+    ax1.fill_between(mids_s, stars_smooth, alpha=0.1, color=color)
+
+    # Plot density on secondary axis for context
+    ax2 = ax1.twinx()
+    color2 = "tab:blue"
+    ax2.set_ylabel("Density (notes/s)", color=color2)
+    ax2.plot(
+        mids_s,
+        dens_s,
+        color=color2,
+        linewidth=1,
+        linestyle="--",
+        alpha=0.5,
+        label="Note Density",
+    )
+    ax2.tick_params(axis="y", labelcolor=color2)
+
+    ax1.set_title(title)
+
+    # Legends
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
+
+    fig.tight_layout()
+    return fig
+
+
+def _smooth_embeddings(embeddings: np.ndarray, window_size: int = 3) -> np.ndarray:
+    """Apply temporal smoothing (moving average) to embeddings."""
+    if len(embeddings) < window_size:
+        return embeddings
+
+    # Kernel for simple moving average
+    kernel = np.ones(window_size) / window_size
+
+    # Apply to each dimension independenty
+    # We can use scipy.ndimage.convolve1d or simplified numpy for dependency-free
+    smoothed = np.zeros_like(embeddings)
+    for dim in range(embeddings.shape[1]):
+        # Padding: 'edge' mode equivalent
+        x = embeddings[:, dim]
+        pad_width = window_size // 2
+        padded = np.pad(x, pad_width, mode="edge")
+
+        # Convolve
+        s = np.convolve(padded, kernel, mode="valid")
+
+        # Handle shape mismatch due to even/odd window
+        if len(s) > len(x):
+            s = s[: len(x)]
+        elif len(s) < len(x):
+            # Should not happen with padded='edge' widely enough but just in case
+            s = np.pad(s, (0, len(x) - len(s)), mode="edge")
+
+        smoothed[:, dim] = s
+
+    return smoothed
+
+
+def _smooth_labels(labels: np.ndarray, window_size: int = 3) -> np.ndarray:
+    """Apply mode filter to labels to enforce temporal continuity."""
+    if len(labels) < window_size:
+        return labels
+
+    n = len(labels)
+    smoothed = labels.copy()
+    pad = window_size // 2
+
+    # Simple sliding window mode
+    for i in range(n):
+        start = max(0, i - pad)
+        end = min(n, i + pad + 1)
+        window = labels[start:end]
+
+        # Find mode
+        counts = np.bincount(window)
+        smoothed[i] = np.argmax(counts)
+
+    return smoothed
+
+
+def _perform_clustering(
+    embeddings: np.ndarray,
+    min_k: int = 3,
+    max_k: int = 8,
+    smoothing_window: int = 3,
+    label_smoothing_window: int = 3,
+    random_state: int = 42,
+) -> tuple[np.ndarray, int, dict]:
+    """
+    Perform K-Means clustering with automatic K selection using Silhouette Score.
+    Applying temporal smoothing to stabilize clusters.
+
+    Args:
+        embeddings: [N, D] data points
+        min_k: Minimum number of clusters
+        max_k: Maximum number of clusters
+
+    Returns:
+        labels: [N] cluster labels
+        best_k: Selected number of clusters
+        stats: Info about clustering quality
+    """
+    # Simply if N is too small
+    N = embeddings.shape[0]
+    if N < min_k:
+        return np.zeros(N, dtype=int), 1, {"score": 0.0}
+
+    # 1. Temporal Smoothing
+    if smoothing_window > 1:
+        # print(f"Smoothing embeddings with window={smoothing_window}")
+        work_embeddings = _smooth_embeddings(embeddings, window_size=smoothing_window)
+    else:
+        work_embeddings = embeddings
+
+    best_score = -1.0
+    best_k = min_k
+    best_model = None
+
+    print(f"Clustering {N} instances...")
+
+    effective_max_k = min(max_k, N - 1)
+    if effective_max_k < min_k:
+        effective_max_k = min_k
+
+    for k in range(min_k, effective_max_k + 1):
+        kmeans = KMeans(n_clusters=k, random_state=random_state, n_init=10)
+        labels = kmeans.fit_predict(work_embeddings)
+        try:
+            score = silhouette_score(work_embeddings, labels)
+            # print(f"K={k}, Silhouette={score:.4f}")
+            if score > best_score:
+                best_score = score
+                best_k = k
+                best_model = kmeans
+        except Exception:
+            pass
+
+    if best_model is None:
+        # Fallback
+        kmeans = KMeans(n_clusters=min_k, random_state=random_state, n_init=10)
+        kmeans.fit(work_embeddings)
+        best_model = kmeans
+        best_k = min_k
+
+    labels = best_model.labels_
+
+    # 2. Label Smoothing (Post-processing)
+    if label_smoothing_window > 1:
+        labels = _smooth_labels(labels, window_size=label_smoothing_window)
+
+    return labels, best_k, {"silhouette": best_score}
+
+
+def _analyze_clusters(
+    cluster_labels: np.ndarray,
+    local_stars: np.ndarray,
+    note_density: np.ndarray,
+    avg_attention: Optional[np.ndarray] = None,
+) -> list[dict]:
+    """
+    Analyze properties of each cluster to create a profile.
+
+    Returns list of dicts: [{id, count, avg_stars, avg_density, avg_attn, desc}]
+    """
+    unique_labels = np.unique(cluster_labels)
+    profiles = []
+
+    for label in unique_labels:
+        mask = cluster_labels == label
+        count = mask.sum()
+
+        avg_s = local_stars[mask].mean() if len(local_stars) > 0 else 0
+        avg_d = note_density[mask].mean() if len(note_density) > 0 else 0
+        avg_a = avg_attention[mask].mean() if avg_attention is not None else 0
+
+        profiles.append(
+            {
+                "Cluster ID": int(label),
+                "Count": int(count),
+                "Avg Stars": float(f"{avg_s:.2f}"),
+                "Avg Density": float(f"{avg_d:.2f}"),
+                "Avg Attention": float(f"{avg_a:.4f}"),
+            }
+        )
+
+    # Sort by Avg Stars to make it intuitive (Cluster 0 = Easiest or Hardest?)
+    # Let's keep ID but maybe we can add a rank?
+    # Sorting purely by ID is safer for consistency with plot colors.
+    profiles.sort(key=lambda x: x["Cluster ID"])
+    return profiles
+
+
+def _plot_clusters(
+    times: list[tuple[float, float]],
+    cluster_labels: np.ndarray,
+    local_stars: np.ndarray,
+    title: str,
+):
+    """Plot timeline colored by cluster ID."""
+    t0 = np.array([a for a, _ in times], dtype=np.float64)
+    t1 = np.array([b for _, b in times], dtype=np.float64)
+    mids = (t0 + t1) / 2.0
+
+    # Sort
+    order = np.argsort(mids)
+    mids_s = mids[order]
+    stars_s = local_stars[order]
+    labels_s = cluster_labels[order]
+
+    unique_labels = np.unique(labels_s)
+    n_clusters = len(unique_labels)
+
+    # Use a distinct colormap
+    cmap = plt.get_cmap("tab10" if n_clusters <= 10 else "tab20")
+
+    fig, ax = plt.subplots(figsize=(10, 3.5))
+
+    # We want to plot segments. Since they are time-sorted, we can just scatter or valid-bar plot.
+    # A step plot or bar plot might be good.
+    # Let's use a scatter plot for simplicity but heavy markers.
+
+    for i, label in enumerate(unique_labels):
+        mask = labels_s == label
+        ax.scatter(
+            mids_s[mask],
+            stars_s[mask],
+            color=cmap(i),
+            label=f"Cluster {label}",
+            s=20,
+            alpha=0.8,
+        )
+
+    # Also plot a faint line to show connectivity
+    ax.plot(mids_s, stars_s, color="gray", alpha=0.2, linewidth=1)
+
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Local Stars")
+    ax.set_title(title)
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0)
+    ax.grid(True, alpha=0.25)
+
+    fig.tight_layout()
+    return fig
+
+
+def _detect_segments(
+    local_stars: np.ndarray,
+    times: list[tuple[float, float]],
+    min_segment_size: int = 3,
+    penalty_scale: float = 1.0,
+) -> list[dict]:
+    """
+    Detect segments using Change Point Detection.
+
+    IMPORTANT: Windows may not be in temporal order (e.g., mixed window sizes).
+    We sort by midpoint time first to ensure temporal coherence.
+    """
+    n = len(local_stars)
+    if n < min_segment_size * 2:
+        return [
+            {
+                "start_time": times[0][0],
+                "end_time": times[-1][1],
+                "avg_stars": float(local_stars.mean()),
+                "n_windows": n,
+            }
+        ]
+
+    # Calculate window midpoints
+    mids = np.array([(t0 + t1) / 2 for t0, t1 in times])
+
+    # SORT by midpoint time (critical for temporal coherence!)
+    order = np.argsort(mids)
+    mids_sorted = mids[order]
+    stars_sorted = local_stars[order]
+    times_sorted = [times[i] for i in order]
+
+    # Build cell boundaries (1D Voronoi on SORTED windows)
+    cell_bounds = [times_sorted[0][0]]  # Song start
+    for i in range(len(mids_sorted) - 1):
+        cell_bounds.append((mids_sorted[i] + mids_sorted[i + 1]) / 2)
+    cell_bounds.append(times_sorted[-1][1])  # Song end
+
+    # Ruptures detection (on SORTED data)
+    signal = stars_sorted.reshape(-1, 1)
+    penalty = np.var(stars_sorted) * penalty_scale
+    algo = rpt.Pelt(model="l2", min_size=min_segment_size).fit(signal)
+    change_points = algo.predict(pen=penalty)
+
+    # Build segments
+    segments = []
+    prev_idx = 0
+
+    for cp in change_points:
+        seg_stars = stars_sorted[prev_idx:cp]
+
+        start_t = cell_bounds[prev_idx]
+        end_t = cell_bounds[cp]
+
+        segments.append(
+            {
+                "start_time": float(start_t),
+                "end_time": float(end_t),
+                "avg_stars": float(seg_stars.mean()),
+                "n_windows": cp - prev_idx,
+            }
+        )
+        prev_idx = cp
+
+    return segments
+
+
+def _plot_segments(
+    times: list[tuple[float, float]],
+    local_stars: np.ndarray,
+    segments: list[dict],
+    title: str,
+):
+    """
+    Plot local difficulty with segment backgrounds (non-overlapping).
+    """
+    t0 = np.array([a for a, _ in times], dtype=np.float64)
+    t1 = np.array([b for _, b in times], dtype=np.float64)
+    mids = (t0 + t1) / 2.0
+
+    order = np.argsort(mids)
+    mids_s = mids[order]
+    stars_s = local_stars[order]
+
+    # Colormap: Red=Hard, Green=Easy
+    cmap = plt.get_cmap("RdYlGn_r")
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+
+    # Normalize colors
+    max_star = max(s["avg_stars"] for s in segments) if segments else 10
+    min_star = min(s["avg_stars"] for s in segments) if segments else 0
+    star_range = max(max_star - min_star, 1)
+
+    # Draw segment backgrounds (should NOT overlap now)
+    for seg in segments:
+        color = cmap((seg["avg_stars"] - min_star) / star_range)
+        ax.axvspan(
+            seg["start_time"], seg["end_time"], alpha=0.3, color=color, linewidth=0
+        )
+
+        # Horizontal line at segment average
+        ax.hlines(
+            y=seg["avg_stars"],
+            xmin=seg["start_time"],
+            xmax=seg["end_time"],
+            colors=color,
+            linewidth=3,
+            alpha=0.9,
+        )
+
+        # Label (only if segment is wide enough)
+        duration = seg["end_time"] - seg["start_time"]
+        if duration > 4:  # Only label if > 4 seconds
+            mid_x = (seg["start_time"] + seg["end_time"]) / 2
+            ax.text(
+                mid_x,
+                seg["avg_stars"] + 0.02,
+                f"{seg['avg_stars']:.1f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                fontweight="bold",
+                color="black",
+                alpha=0.8,
+            )
+
+    # Raw data on top
+    ax.plot(mids_s, stars_s, color="gray", alpha=0.4, linewidth=1)
+
+    # Boundary lines
+    for seg in segments[1:]:
+        ax.axvline(
+            x=seg["start_time"], color="black", linewidth=1, linestyle="--", alpha=0.5
+        )
+
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Raw Score")
+    ax.set_title(title)
+    ax.set_ylim(bottom=0, top=max_star + 2)
+    ax.grid(True, alpha=0.15, axis="y")
+
+    fig.tight_layout()
+    return fig
+
+
 def _plot_attention_concentration(
     avg_attention: np.ndarray,
     title: str,
@@ -601,6 +1045,16 @@ def run_inference(
     branch_attn = attn.get("branch_attentions")
     topk_mask = attn.get("topk_mask")
 
+    # Local Difficulty Estimation (Probe)
+    # Use the predicted class ID if no hint was provided
+    calib_diff_id = difficulty_hint
+    if calib_diff_id is None:
+        calib_diff_id = out.difficulty_logits.argmax(dim=-1, keepdim=True)  # [1, 1]
+
+    local_raw, local_stars = model.get_instance_scores(
+        out.instance_embeddings, difficulty_class_id=calib_diff_id.view(-1)
+    )
+
     avg_attn_np = (
         avg_attn[0, : counts.item()].detach().cpu().numpy()
         if avg_attn is not None
@@ -616,6 +1070,8 @@ def run_inference(
         if branch_attn is not None
         else None
     )
+    local_stars_np = local_stars[0, : counts.item()].detach().cpu().numpy()
+    local_raw_np = local_raw[0, : counts.item()].detach().cpu().numpy()
 
     # Plots
     fig_attn = None
@@ -639,7 +1095,50 @@ def run_inference(
             title="Attention concentration (how many windows dominate)",
         )
 
-    # Heatmap: sort instances by time for interpretability
+    fig_local_diff = None
+    if local_stars_np is not None:
+        fig_local_diff = _plot_local_difficulty(
+            times,
+            local_stars_np,
+            token_counts,
+            title=f"Estimated Local Difficulty Curve (Assuming {pred_class} calibration)",
+        )
+
+    # Segment Detection (Piecewise Constant Change Point Detection)
+    fig_segments = None
+    segment_table_df = None
+
+    if local_raw_np is not None and len(times) > 0:
+        segments = _detect_segments(
+            local_raw_np,  # Use raw score instead of stars
+            times,
+            min_segment_size=3,
+            penalty_scale=0.5,
+        )
+
+        # Create table rows
+        seg_rows = []
+        for i, seg in enumerate(segments):
+            seg_rows.append(
+                [
+                    i + 1,
+                    f"{seg['start_time']:.1f}",
+                    f"{seg['end_time']:.1f}",
+                    f"{seg['end_time'] - seg['start_time']:.1f}",
+                    f"{seg['avg_stars']:.1f}",  # This is now avg_raw
+                    seg["n_windows"],
+                ]
+            )
+        segment_table_df = seg_rows
+
+        fig_segments = _plot_segments(
+            times,
+            local_raw_np,  # Use raw score
+            segments,
+            title=f"Chart Structure: {len(segments)} Segments Detected",
+        )
+
+    # Meta/details
     if branch_np is not None:
         mids = np.array([(a + b) / 2.0 for a, b in times], dtype=np.float64)
         order = np.argsort(mids)
@@ -668,6 +1167,7 @@ def run_inference(
                 int(token_counts[i]) if i < len(token_counts) else None,
                 float(avg_attn_np[i]) if avg_attn_np is not None else None,
                 int(topk_np[i]) if topk_np is not None else None,
+                float(local_stars_np[i]) if i < len(local_stars_np) else None,
             ]
         )
 
@@ -733,6 +1233,9 @@ def run_inference(
         fig_conc,
         top_md,
         rows,
+        fig_local_diff,
+        fig_segments,
+        segment_table_df,
     )
 
 
@@ -754,69 +1257,91 @@ def build_app() -> gr.Blocks:
 
     with gr.Blocks(title="TaikoChartEstimator Inference") as demo:
         gr.Markdown("# TaikoChartEstimator - Inference")
-        gr.Markdown(
-            """
-## How to Read Visualizations
-
-- The model splits the chart into multiple **windows (instances)** and aggregates them using MIL (Multiple Instance Learning) for a prediction.
-- `Avg attention` is the importance weight of this window for the final judgment; it is typically normalized by softmax within a single chart, so the values are usually small.
-- `Top-k` is another Top-K pooling branch that selects windows that "look most like peak difficulty points"; they do not necessarily overlap perfectly with attention peaks.
-
-Recommended combinations:
-- `Token density vs attention`: Check if high-density segments are simultaneously emphasized.
-- `Attention concentration`: Check if the model relies on only a few windows (closer to 1 means more concentrated).
-"""
-        )
 
         with gr.Row():
-            with gr.Column(scale=1):
-                tja_file = gr.File(
-                    label="Upload .tja", file_types=[".tja"], type="filepath"
-                )
-                tja_text = gr.Textbox(label="Or paste TJA content", lines=16)
+            # Left: Input (Upload/Paste with tabs)
+            with gr.Column(scale=2):
+                with gr.Tabs():
+                    with gr.TabItem("Upload"):
+                        tja_file = gr.File(label="Upload TJA file")
+                    with gr.TabItem("Paste"):
+                        tja_text = gr.Textbox(label="Paste TJA content", lines=12)
 
                 course = gr.Dropdown(label="COURSE", choices=[], value=None)
+                btn = gr.Button("Run Inference", variant="primary", size="lg")
 
+            # Right: Options
+            with gr.Column(scale=1):
+                gr.Markdown("### Options")
                 checkpoint = gr.Dropdown(
                     label="Checkpoint",
                     choices=checkpoints,
                     value=checkpoints[-1] if checkpoints else None,
                     allow_custom_value=True,
                 )
-
                 device = gr.Dropdown(
                     label="Device", choices=["cpu", "mps", "cuda"], value="cpu"
                 )
 
-                window_measures = gr.Textbox(
-                    label="window_measures (comma-separated)", value="2,4"
-                )
-                hop_measures = gr.Slider(
-                    label="hop_measures", minimum=1, maximum=8, value=2, step=1
-                )
-                max_instances = gr.Slider(
-                    label="max_instances", minimum=8, maximum=256, value=64, step=1
-                )
+                with gr.Accordion("Advanced", open=False):
+                    window_measures = gr.Textbox(
+                        label="window_measures (comma-separated)", value="2,4"
+                    )
+                    hop_measures = gr.Slider(
+                        label="hop_measures", minimum=1, maximum=8, value=2, step=1
+                    )
+                    max_instances = gr.Slider(
+                        label="max_instances", minimum=1, maximum=512, value=128, step=1
+                    )
 
-                run_btn = gr.Button("Run inference", variant="primary")
-
-            with gr.Column(scale=2):
+        with gr.Row():
+            with gr.Column(scale=1):
                 summary = gr.Markdown()
-                meta_json = gr.JSON(label="Details")
-                attn_plot = gr.Plot(label="Attention (time-sorted)")
-                density_plot = gr.Plot(label="Token density vs attention")
-                heat_plot = gr.Plot(label="Branch attention heatmap")
-                conc_plot = gr.Plot(label="Attention concentration")
                 top_segments = gr.Markdown()
-                table = gr.Dataframe(
+            with gr.Column(scale=1):
+                meta_json = gr.JSON(label="Metadata")
+
+        with gr.Tabs():
+            with gr.TabItem("Chart Structure"):
+                gr.Markdown("### Automatic Segment Detection")
+                gr.Markdown(
+                    "Detects distinct sections based on difficulty changes (Piecewise Constant Model)."
+                )
+                plot_segments = gr.Plot(label="Detected Segments")
+                segment_table = gr.Dataframe(
                     headers=[
-                        "instance_idx",
-                        "t_start",
-                        "t_end",
-                        "t_mid",
-                        "token_count",
-                        "avg_attention",
-                        "topk_selected",
+                        "#",
+                        "Start (s)",
+                        "End (s)",
+                        "Duration",
+                        "Avg Raw",
+                        "Windows",
+                    ],
+                    datatype=["number", "str", "str", "str", "str", "number"],
+                    label="Segment Details",
+                )
+            with gr.TabItem("Local Difficulty"):
+                plot_local_diff = gr.Plot(label="Local Difficulty Curve")
+            with gr.TabItem("Attention & Density"):
+                plot_density = gr.Plot(label="Density vs Attention")
+            with gr.TabItem("Attention Details"):
+                plot_attn = gr.Plot(label="Raw Attention")
+            with gr.TabItem("Heatmap"):
+                plot_heat = gr.Plot(label="Branch Heatmap")
+            with gr.TabItem("Concentration"):
+                plot_conc = gr.Plot(label="Concentration")
+            with gr.TabItem("Raw Data"):
+                # headers needs to match rows
+                df = gr.Dataframe(
+                    headers=[
+                        "id",
+                        "start",
+                        "end",
+                        "mid",
+                        "tokens",
+                        "attention",
+                        "is_topk",
+                        "local_stars",
                     ],
                     datatype=[
                         "number",
@@ -826,9 +1351,8 @@ Recommended combinations:
                         "number",
                         "number",
                         "number",
+                        "number",
                     ],
-                    label="Per-instance details",
-                    wrap=True,
                 )
 
         # Auto-refresh COURSE choices when input changes
@@ -839,7 +1363,7 @@ Recommended combinations:
             _update_course_dropdown, inputs=[tja_file, tja_text], outputs=[course]
         )
 
-        run_btn.click(
+        btn.click(
             run_inference,
             inputs=[
                 tja_file,
@@ -854,12 +1378,15 @@ Recommended combinations:
             outputs=[
                 summary,
                 meta_json,
-                attn_plot,
-                density_plot,
-                heat_plot,
-                conc_plot,
+                plot_attn,
+                plot_density,
+                plot_heat,
+                plot_conc,
                 top_segments,
-                table,
+                df,
+                plot_local_diff,
+                plot_segments,
+                segment_table,
             ],
         )
 

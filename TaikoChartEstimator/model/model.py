@@ -256,6 +256,88 @@ class TaikoChartEstimator(nn.Module, PyTorchModelHubMixin):
             instance_embeddings=instance_embeddings,
         )
 
+    def get_instance_scores(
+        self,
+        instance_embeddings: torch.Tensor,
+        difficulty_class_id: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Estimate difficulty score for each individual instance.
+
+        This acts as a "probe": we ask the model "if the whole song consisted
+        only of this specific instance, what would the difficulty be?"
+
+        Args:
+            instance_embeddings: [batch, n_instances, d_model]
+            difficulty_class_id: [batch] Optional difficulty class for calibration
+
+        Returns:
+            raw_scores: [batch, n_instances] Unbounded raw scores
+            star_ratings: [batch, n_instances] Calibrated star ratings
+        """
+        batch_size, n_instances, _ = instance_embeddings.shape
+
+        # We need to pass each instance through the aggregator's fusion layer.
+        # The aggregator usually combines Mean, Top-K, and Branch outputs.
+        # For a single-instance bag:
+        # - Mean pooling = the instance itself
+        # - Top-K pooling = the instance itself
+        # - Branch pooling = the instance itself (weighted by 1.0)
+
+        # So we can construct the fused input directly.
+        # Concatenation order in MILAggregator: [mean, topk, branch_1, ..., branch_n]
+
+        # [batch, n_instances, d_instance]
+        feat = instance_embeddings
+
+        # Construct the concatenated feature vector for a "single-instance bag"
+        # We repeat the feature for: Mean (1) + TopK (1) + Branches (n_branches)
+        # Total repeats = 2 + n_branches
+        if hasattr(self.aggregator, "n_branches"):
+            n_repeats = 2 + self.aggregator.n_branches
+            # fused_input: [batch, n_instances, d_instance * n_repeats]
+            fused_input = feat.repeat(1, 1, n_repeats)
+
+            # Pass through fusion layer
+            # fusion expects [..., input_dim], so we can pass (batch * n_inst)
+            flat_input = fused_input.view(-1, fused_input.size(-1))
+            bag_embedding = self.aggregator.fusion(
+                flat_input
+            )  # [batch * n_inst, output_dim]
+        elif isinstance(
+            self.aggregator, type(self).GatedMILAggregator
+        ):  # Check if Gated
+            # Gated aggregator output projection
+            # Gated aggregation of 1 instance is just the instance projected
+            flat_feat = feat.view(-1, feat.size(-1))
+            bag_embedding = self.aggregator.output_proj(flat_feat)
+        else:
+            # Fallback for generic/unknown aggregator
+            # Assume we can just run the aggregator on size-1 bags?
+            # But that's slow. Let's try to simulate if simple enough.
+            # For now, raise or return zeros if unknown.
+            return torch.zeros_like(feat[..., 0]), torch.zeros_like(feat[..., 0])
+
+        # Raw score head
+        raw_score = self.raw_score_head(bag_embedding)  # [batch * n_inst, 1]
+        raw_score = raw_score.view(batch_size, n_instances)
+
+        # Calibration
+        # If no difficulty provided, predict it from the single instance
+        if difficulty_class_id is None:
+            logits = self.difficulty_classifier(bag_embedding)
+            diff_ids = logits.argmax(dim=-1)  # [batch * n_inst]
+        else:
+            # Expand provided difficulty to per-instance
+            diff_ids = difficulty_class_id.unsqueeze(1).repeat(1, n_instances).view(-1)
+
+        # Calibrate
+        flat_raw = raw_score.view(-1)
+        stars = self.calibrator(flat_raw, diff_ids)  # [batch * n_inst]
+        stars = stars.view(batch_size, n_instances)
+
+        return raw_score, stars
+
     def predict(
         self,
         instances: torch.Tensor,
