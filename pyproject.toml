@@ -1,0 +1,34 @@
+[project]
+name = "TaikoChartEstimator"
+version = "0.1.0"
+description = "MIL-based Taiko chart difficulty estimator with Transformer encoders"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Jacob Lin" }]
+dependencies = [
+    "accelerate>=1.12.0",
+    "datasets>=4.4.2",
+    "huggingface-hub>=1.2.3",
+    "numpy>=2.4.0",
+    "safetensors>=0.7.0",
+    "scikit-learn>=1.8.0",
+    "scipy>=1.16.3",
+    "tensorboard>=2.20.0",
+    "torch>=2.9.1",
+    "torchaudio>=2.9.1",
+    "torchcodec>=0.9.1",
+    "tqdm>=4.67.1",
+]
+
+[project.urls]
+homepage = "https://github.com/JacobLinCool/TaikoChartEstimator"
+repository = "https://github.com/JacobLinCool/TaikoChartEstimator"
+
+[project.scripts]
+tce-train = "TaikoChartEstimator.train.__main__:main"
+tce-eval = "TaikoChartEstimator.eval.evaluator:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
