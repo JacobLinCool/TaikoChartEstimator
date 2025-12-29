@@ -125,6 +125,25 @@ def parse_args():
     parser.add_argument(
         "--num-workers", type=int, default=16, help="Number of data loader workers"
     )
+    parser.add_argument(
+        "--window-measures",
+        type=int,
+        nargs="+",
+        default=[2, 4],
+        help="Window sizes in measures (default: 2 4)",
+    )
+    parser.add_argument(
+        "--hop-measures",
+        type=int,
+        default=2,
+        help="Window hop size in measures (default: 2)",
+    )
+    parser.add_argument(
+        "--max-instances",
+        type=int,
+        default=64,
+        help="Maximum instances (windows) per chart (default: 64)",
+    )
 
     return parser.parse_args()
 
@@ -601,6 +620,9 @@ def main():
         dataset_name=args.dataset,
         include_audio=args.include_audio,
         cache_dir=args.cache_dir,
+        window_measures=args.window_measures,
+        hop_measures=args.hop_measures,
+        max_instances_per_chart=args.max_instances,
     )
 
     val_dataset = TaikoChartDataset(
@@ -608,6 +630,9 @@ def main():
         dataset_name=args.dataset,
         include_audio=args.include_audio,
         cache_dir=args.cache_dir,
+        window_measures=args.window_measures,
+        hop_measures=args.hop_measures,
+        max_instances_per_chart=args.max_instances,
     )
 
     print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")

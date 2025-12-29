@@ -122,8 +122,8 @@ class Evaluator:
         ]:
             results[key] = np.array(results[key])
 
-        if results["attention_weights"]:
-            results["attention_weights"] = np.stack(results["attention_weights"])
+        # Note: attention_weights remain as a list since each sample can have
+        # different numbers of instances (variable-length attention vectors)
 
         return results
 
@@ -423,6 +423,25 @@ def main():
     parser.add_argument(
         "--num-workers", type=int, default=4, help="Number of data loader workers"
     )
+    parser.add_argument(
+        "--window-measures",
+        type=int,
+        nargs="+",
+        default=[2, 4],
+        help="Window sizes in measures (default: 2 4)",
+    )
+    parser.add_argument(
+        "--hop-measures",
+        type=int,
+        default=2,
+        help="Window hop size in measures (default: 2)",
+    )
+    parser.add_argument(
+        "--max-instances",
+        type=int,
+        default=64,
+        help="Maximum instances (windows) per chart (default: 64)",
+    )
 
     args = parser.parse_args()
 
@@ -437,6 +456,9 @@ def main():
     dataset = TaikoChartDataset(
         split=args.split,
         dataset_name=args.dataset,
+        window_measures=args.window_measures,
+        hop_measures=args.hop_measures,
+        max_instances_per_chart=args.max_instances,
     )
 
     dataloader = DataLoader(

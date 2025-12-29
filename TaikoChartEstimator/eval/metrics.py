@@ -418,38 +418,48 @@ class MILHealthMetrics:
 
     def compute(
         self,
-        attention_weights: np.ndarray,
+        attention_weights: list[np.ndarray],
         instance_counts: Optional[np.ndarray] = None,
     ) -> dict:
         """
         Compute MIL attention health metrics.
 
         Args:
-            attention_weights: Attention weights [N_samples, N_instances]
-            instance_counts: Number of valid instances per sample
+            attention_weights: List of attention weight arrays, each with shape
+                               [N_instances] where N_instances can vary per sample.
+            instance_counts: Number of valid instances per sample (optional,
+                             used for health ratio calculation)
 
         Returns:
             Dict with metrics
         """
         metrics = {}
-        n_samples, n_instances = attention_weights.shape
 
-        # Mask invalid instances if counts provided
-        if instance_counts is not None:
-            mask = np.arange(n_instances)[None, :] < instance_counts[:, None]
-        else:
-            mask = np.ones_like(attention_weights, dtype=bool)
+        if not attention_weights:
+            return metrics
+
+        n_samples = len(attention_weights)
 
         # Attention entropy per sample
         # Higher entropy = more distributed attention (good for MIL)
         entropies = []
         effective_ns = []
         top5_masses = []
+        actual_instance_counts = []
 
-        for i in range(n_samples):
-            attn = attention_weights[i, mask[i]]
+        for i, attn in enumerate(attention_weights):
             if len(attn) == 0:
                 continue
+
+            # Use instance_counts to mask if provided, otherwise use full attention
+            if instance_counts is not None:
+                n_valid = int(instance_counts[i])
+                attn = attn[:n_valid]
+
+            if len(attn) == 0:
+                continue
+
+            actual_instance_counts.append(len(attn))
 
             # Normalize to sum to 1
             attn = attn / (attn.sum() + 1e-8)
@@ -482,17 +492,8 @@ class MILHealthMetrics:
 
         # Health assessment
         # Collapse warning if too few effective instances
-        if effective_ns:
-            collapse_ratio = np.mean(effective_ns) / np.mean(
-                [
-                    c if instance_counts is not None else n_instances
-                    for c in (
-                        instance_counts
-                        if instance_counts is not None
-                        else [n_instances]
-                    )
-                ]
-            )
+        if effective_ns and actual_instance_counts:
+            collapse_ratio = np.mean(effective_ns) / np.mean(actual_instance_counts)
             metrics["health_ratio"] = collapse_ratio
             metrics["attention_collapse_warning"] = (
                 collapse_ratio < 0.1
