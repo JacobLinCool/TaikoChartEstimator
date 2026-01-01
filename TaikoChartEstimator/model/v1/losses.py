@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..constants import STAR_RANGES_BY_ID as STAR_RANGES
+from ...constants import STAR_RANGES_BY_ID as STAR_RANGES
 
 
 class WithinSongRankingLoss(nn.Module):

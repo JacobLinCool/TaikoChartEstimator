@@ -1,26 +1,25 @@
 """
-TaikoChartEstimator Data Pipeline
+TaikoChartEstimator Data Pipeline - Version 1
 
 Provides event tokenization, dataset loading, and audio processing for
 MIL-based Taiko chart difficulty estimation.
-
-Re-exports from v1 (current default implementation).
 """
 
-# Re-export v1 as default
-from .v1 import (
-    DIFFICULTY_ORDER,
-    NOTE_TYPE_TO_ID,
-    NOTE_TYPES,
-    AudioProcessor,
+from .audio import AudioProcessor
+from .dataset import (
     ChartBag,
-    EventToken,
-    EventTokenizer,
     SongGroup,
     TaikoChartDataset,
     WithinSongBatchSampler,
     WithinSongPairSampler,
     collate_chart_bags,
+)
+from .tokenizer import (
+    DIFFICULTY_ORDER,
+    NOTE_TYPE_TO_ID,
+    NOTE_TYPES,
+    EventToken,
+    EventTokenizer,
 )
 
 __all__ = [

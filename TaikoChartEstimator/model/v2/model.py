@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from huggingface_hub import PyTorchModelHubMixin
 
-from ..data.tokenizer import DIFFICULTY_ORDER
+from ...data.v2.tokenizer import DIFFICULTY_ORDER
 from .aggregator import GatedMILAggregator, MILAggregator
 from .encoder import InstanceEncoder, TCNInstanceEncoder
 from .heads import DifficultyClassifier, MonotonicCalibrator, RawScoreHead

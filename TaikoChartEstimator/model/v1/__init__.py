@@ -1,32 +1,22 @@
 """
-TaikoChartEstimator Model Package
+TaikoChartEstimator Model Package - Version 1
 
 Provides the MIL-based difficulty estimation model with:
 - Instance encoder (Transformer-based)
 - MIL aggregator with multi-branch attention
 - Multi-head outputs (raw score, difficulty class, star rating)
-
-Re-exports from v1 (current default implementation).
 """
 
-# Re-export v1 as default
-from .v1 import (
+from .aggregator import GatedMILAggregator, MILAggregator
+from .encoder import InstanceEncoder, TCNInstanceEncoder
+from .heads import DifficultyClassifier, MonotonicCalibrator, RawScoreHead
+from .losses import (
     CensoredRegressionLoss,
     CurriculumScheduler,
-    DifficultyClassifier,
-    GatedMILAggregator,
-    InstanceEncoder,
-    MILAggregator,
-    ModelConfig,
-    ModelOutput,
-    MonotonicCalibrator,
-    RawScoreHead,
-    TaikoChartEstimator,
-    TCNInstanceEncoder,
     TotalLoss,
     WithinSongRankingLoss,
-    create_model,
 )
+from .model import ModelConfig, ModelOutput, TaikoChartEstimator, create_model
 
 __all__ = [
     "InstanceEncoder",

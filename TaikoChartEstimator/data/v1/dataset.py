@@ -17,15 +17,15 @@ from datasets import load_dataset
 from torch.utils.data import Dataset, Sampler
 
 # Import from centralized constants
-from ..constants import (
+from ...constants import (
     DIFFICULTY_CLASSES,
     DIFFICULTY_ORDER,
     NOTE_TYPE_TO_ID,
 )
-from ..constants import (
+from ...constants import (
     DIFFICULTY_TO_ID as DIFFICULTY_TO_CLASS_ID,
 )
-from ..constants import (
+from ...constants import (
     STAR_RANGES_BY_NAME as STAR_RANGES,
 )
 from .audio import AudioProcessor

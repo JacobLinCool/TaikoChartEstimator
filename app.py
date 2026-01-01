@@ -11,8 +11,8 @@ import torch
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
-from TaikoChartEstimator.data.tokenizer import EventTokenizer
-from TaikoChartEstimator.model.model import TaikoChartEstimator
+from TaikoChartEstimator.data.v1.tokenizer import EventTokenizer
+from TaikoChartEstimator.model.v1.model import TaikoChartEstimator
 
 
 @dataclass
@@ -307,7 +307,10 @@ def _discover_checkpoints() -> list[str]:
             paths.append(p)
     # Also accept HF / user-provided paths via manual input
     if not paths:
-        return ["JacobLinCool/TaikoChartEstimator-20251228"]
+        return [
+            "JacobLinCool/TaikoChartEstimator-20251228",
+            "JacobLinCool/TaikoChartEstimator-20251229",
+        ]
     return sorted(paths)
 
 
@@ -1205,15 +1208,21 @@ def run_inference(
         "max_tokens_per_instance": int(max_tokens),
         "window_measures": window_measures,
         "hop_measures": int(hop_measures),
-        "attention_entropy": float(attn.get("entropy")[0].item())
-        if attn.get("entropy") is not None
-        else None,
-        "attention_effective_n": float(attn.get("effective_n")[0].item())
-        if attn.get("effective_n") is not None
-        else None,
-        "attention_top5_mass": float(attn.get("top5_mass")[0].item())
-        if attn.get("top5_mass") is not None
-        else None,
+        "attention_entropy": (
+            float(attn.get("entropy")[0].item())
+            if attn.get("entropy") is not None
+            else None
+        ),
+        "attention_effective_n": (
+            float(attn.get("effective_n")[0].item())
+            if attn.get("effective_n") is not None
+            else None
+        ),
+        "attention_top5_mass": (
+            float(attn.get("top5_mass")[0].item())
+            if attn.get("top5_mass") is not None
+            else None
+        ),
     }
 
     summary_md = (
