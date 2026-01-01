@@ -9,12 +9,14 @@ Supports:
 - Multi-objective checkpoint selection
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import torch
@@ -30,9 +32,31 @@ from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from ..data import TaikoChartDataset, WithinSongPairSampler, collate_chart_bags
-from ..data.tokenizer import DIFFICULTY_ORDER
-from ..model import CurriculumScheduler, ModelConfig, TaikoChartEstimator, TotalLoss
+# V1 imports for backward compatibility (will be overridden by dynamic loading)
+from ..data import DIFFICULTY_ORDER, WithinSongPairSampler
+from ..model import CurriculumScheduler, TotalLoss
+
+# Type hints (avoid runtime import of version-specific classes)
+if TYPE_CHECKING:
+    from ..data.v1.dataset import TaikoChartDataset
+    from ..model.v1.model import TaikoChartEstimator
+
+
+def get_components(version: str = "v1"):
+    """Dynamically load components based on version."""
+    if version == "v2":
+        from ..data.v2.dataset import TaikoChartDataset, collate_chart_bags
+        from ..model.v2.model import ModelConfig, TaikoChartEstimator
+    else:
+        from ..data.v1.dataset import TaikoChartDataset, collate_chart_bags
+        from ..model.v1.model import ModelConfig, TaikoChartEstimator
+
+    return {
+        "TaikoChartDataset": TaikoChartDataset,
+        "collate_chart_bags": collate_chart_bags,
+        "ModelConfig": ModelConfig,
+        "TaikoChartEstimator": TaikoChartEstimator,
+    }
 
 
 def parse_args():
@@ -143,6 +167,13 @@ def parse_args():
         type=int,
         default=64,
         help="Maximum instances (windows) per chart (default: 64)",
+    )
+    parser.add_argument(
+        "--version",
+        type=str,
+        default="v1",
+        choices=["v1", "v2"],
+        help="Model/data version (v1 or v2)",
     )
 
     return parser.parse_args()
@@ -612,6 +643,14 @@ def main():
 
     print(f"Output directory: {output_dir}")
     print(f"TensorBoard directory: {tensorboard_dir}")
+    print(f"Using version: {args.version}")
+
+    # Load version-specific components
+    components = get_components(args.version)
+    TaikoChartDataset = components["TaikoChartDataset"]
+    collate_chart_bags = components["collate_chart_bags"]
+    ModelConfig = components["ModelConfig"]
+    TaikoChartEstimator = components["TaikoChartEstimator"]
 
     # Load datasets
     print("Loading datasets...")

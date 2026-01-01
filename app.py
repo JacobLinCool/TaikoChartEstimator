@@ -11,8 +11,9 @@ import torch
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
-from TaikoChartEstimator.data.v1.tokenizer import EventTokenizer
-from TaikoChartEstimator.model.v1.model import TaikoChartEstimator
+# Dynamic imports to avoid loading v1 by default
+# from TaikoChartEstimator.data.v1.tokenizer import EventTokenizer
+# from TaikoChartEstimator.model.v1.model import TaikoChartEstimator
 
 
 @dataclass
@@ -314,7 +315,7 @@ def _discover_checkpoints() -> list[str]:
     return sorted(paths)
 
 
-_MODEL_CACHE: dict[str, TaikoChartEstimator] = {}
+_MODEL_CACHE: dict[str, Any] = {}
 
 
 def _resolve_device(device: str) -> str:
@@ -330,13 +331,38 @@ def _resolve_device(device: str) -> str:
     return "cpu"
 
 
-def _load_model(checkpoint_path: str, device: str) -> TaikoChartEstimator:
+def get_model_class(version: str = "v1"):
+    if version == "v2":
+        from TaikoChartEstimator.model.v2.model import TaikoChartEstimator
+
+        return TaikoChartEstimator
+    else:
+        from TaikoChartEstimator.model.v1.model import TaikoChartEstimator
+
+        return TaikoChartEstimator
+
+
+def get_tokenizer_class(version: str = "v1"):
+    if version == "v2":
+        from TaikoChartEstimator.data.v2.tokenizer import EventTokenizer
+
+        return EventTokenizer
+    else:
+        from TaikoChartEstimator.data.v1.tokenizer import EventTokenizer
+
+        return EventTokenizer
+
+
+def _load_model(
+    checkpoint_path: str, device: str, version: str = "v1"
+) -> Any:  # Returns TaikoChartEstimator
     device = _resolve_device(device)
-    key = f"{checkpoint_path}::{device}"
+    key = f"{checkpoint_path}::{device}::{version}"
     if key in _MODEL_CACHE:
         return _MODEL_CACHE[key]
 
-    model = TaikoChartEstimator.from_pretrained(checkpoint_path)
+    ModelClass = get_model_class(version)
+    model = ModelClass.from_pretrained(checkpoint_path)
     model.eval()
     model.to(torch.device(device))
     _MODEL_CACHE[key] = model
@@ -349,10 +375,12 @@ def _build_instances_from_segments(
     window_measures: list[int],
     hop_measures: int,
     max_instances_per_chart: int,
+    version: str = "v1",
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, list[tuple[float, float]], list[int]
 ]:
-    tokenizer = EventTokenizer()
+    TokenizerClass = get_tokenizer_class(version)
+    tokenizer = TokenizerClass()
     tokens = tokenizer.tokenize_chart(segments)
 
     all_instances: list[torch.Tensor] = []
@@ -968,20 +996,21 @@ def _plot_attention_concentration(
 
 
 def run_inference(
-    tja_file,
-    tja_text: str,
-    course_name: str,
-    checkpoint_path: str,
-    device: str,
-    window_measures_text: str,
-    hop_measures: int,
-    max_instances: int,
+    file_obj,
+    text_content,
+    course_name,
+    checkpoint_path,
+    device,
+    window_measures_str,
+    hop_measures,
+    max_instances,
+    version="v1",
 ):
-    if tja_file:
-        with open(tja_file, "r", encoding="utf-8", errors="ignore") as f:
-            tja_text = f.read()
+    if file_obj:
+        with open(file_obj.name, "r", encoding="utf-8", errors="ignore") as f:
+            text_content = f.read()
 
-    parsed = parse_tja(tja_text)
+    parsed = parse_tja(text_content)
     if not parsed.courses:
         raise gr.Error("No COURSE found and no chart parsed.")
 
@@ -993,7 +1022,7 @@ def run_inference(
 
     try:
         window_measures = [
-            int(x.strip()) for x in window_measures_text.split(",") if x.strip()
+            int(x.strip()) for x in window_measures_str.split(",") if x.strip()
         ]
     except ValueError:
         raise gr.Error(
@@ -1003,7 +1032,7 @@ def run_inference(
         window_measures = [2, 4]
 
     device = _resolve_device(device)
-    model = _load_model(checkpoint_path, device=device)
+    model = _load_model(checkpoint_path, device, version=version)
     max_tokens = int(getattr(model.config, "max_seq_len", 128))
 
     instances, masks, counts, times, token_counts = _build_instances_from_segments(
@@ -1012,6 +1041,7 @@ def run_inference(
         window_measures=window_measures,
         hop_measures=int(hop_measures),
         max_instances_per_chart=int(max_instances),
+        version=version,
     )
 
     instances = instances.to(torch.device(device))
@@ -1264,8 +1294,11 @@ def _update_course_dropdown(tja_file, tja_text: str):
 def build_app() -> gr.Blocks:
     checkpoints = _discover_checkpoints()
 
-    with gr.Blocks(title="TaikoChartEstimator Inference") as demo:
-        gr.Markdown("# TaikoChartEstimator - Inference")
+    with gr.Blocks(title="Taiko Estimator") as demo:
+        # State for version (CLI override or UI default)
+        version_state = gr.State(value="v1")
+
+        gr.Markdown("# Taiko Difficulty Estimator")
 
         with gr.Row():
             # Left: Input (Upload/Paste with tabs)
@@ -1301,6 +1334,9 @@ def build_app() -> gr.Blocks:
                     )
                     max_instances = gr.Slider(
                         label="max_instances", minimum=1, maximum=512, value=128, step=1
+                    )
+                    model_version = gr.Dropdown(
+                        choices=["v1", "v2"], value="v1", label="Model Version"
                     )
 
         with gr.Row():
@@ -1383,6 +1419,7 @@ def build_app() -> gr.Blocks:
                 window_measures,
                 hop_measures,
                 max_instances,
+                model_version,
             ],
             outputs=[
                 summary,
