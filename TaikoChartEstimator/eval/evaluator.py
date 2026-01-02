@@ -4,19 +4,19 @@ Evaluator for TaikoChartEstimator
 Orchestrates evaluation across all metric types and generates reports.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from ..data import TaikoChartDataset, collate_chart_bags
-from ..model import ModelConfig, TaikoChartEstimator
 from .metrics import (
     DecompressionMetrics,
     DifficultyMetrics,
@@ -24,6 +24,28 @@ from .metrics import (
     MonotonicityMetrics,
     StarMetrics,
 )
+
+# Type hints (avoid runtime import of version-specific classes)
+if TYPE_CHECKING:
+    from ..data.v1.dataset import TaikoChartDataset
+    from ..model.v1.model import TaikoChartEstimator
+
+
+def get_components(version: str = "v1"):
+    """Dynamically load components based on version."""
+    if version == "v2":
+        from ..data.v2.dataset import TaikoChartDataset, collate_chart_bags
+        from ..model.v2.model import ModelConfig, TaikoChartEstimator
+    else:
+        from ..data.v1.dataset import TaikoChartDataset, collate_chart_bags
+        from ..model.v1.model import ModelConfig, TaikoChartEstimator
+
+    return {
+        "TaikoChartDataset": TaikoChartDataset,
+        "collate_chart_bags": collate_chart_bags,
+        "ModelConfig": ModelConfig,
+        "TaikoChartEstimator": TaikoChartEstimator,
+    }
 
 
 class Evaluator:
@@ -358,6 +380,7 @@ class Evaluator:
 def load_model_from_checkpoint(
     checkpoint_path: Path,
     device: torch.device,
+    version: str = "v1",
 ) -> TaikoChartEstimator:
     """
     Load model from checkpoint.
@@ -374,6 +397,9 @@ def load_model_from_checkpoint(
         Loaded TaikoChartEstimator model
     """
     checkpoint_path = Path(checkpoint_path)
+    components = get_components(version)
+    ModelConfig = components["ModelConfig"]
+    TaikoChartEstimator = components["TaikoChartEstimator"]
 
     if checkpoint_path.is_dir():
         # HuggingFace pretrained directory format
@@ -442,14 +468,29 @@ def main():
         default=64,
         help="Maximum instances (windows) per chart (default: 64)",
     )
+    parser.add_argument(
+        "--version",
+        type=str,
+        default="v1",
+        choices=["v1", "v2"],
+        help="Model/data version (v1 or v2)",
+    )
 
     args = parser.parse_args()
 
     device = torch.device(args.device)
+    print(f"Using version: {args.version}")
+
+    # Load version-specific components
+    components = get_components(args.version)
+    TaikoChartDataset = components["TaikoChartDataset"]
+    collate_chart_bags = components["collate_chart_bags"]
 
     # Load model
     print(f"Loading model from {args.checkpoint}")
-    model = load_model_from_checkpoint(Path(args.checkpoint), device)
+    model = load_model_from_checkpoint(
+        Path(args.checkpoint), device, version=args.version
+    )
 
     # Load dataset
     print(f"Loading {args.split} dataset...")
