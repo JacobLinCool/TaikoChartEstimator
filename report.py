@@ -123,6 +123,7 @@ def run_inference_for_course(
     window_measures: list[int],
     hop_measures: int,
     max_instances: int,
+    version: str = "v1",
 ) -> CourseResult:
     """Run inference on a single course.
 
@@ -137,6 +138,7 @@ def run_inference_for_course(
         window_measures=window_measures,
         hop_measures=hop_measures,
         max_instances_per_chart=max_instances,
+        version=version,
     )
 
     instances = instances.to(torch.device(device))
@@ -185,6 +187,7 @@ def process_tja_file(
     hop_measures: int,
     max_instances: int,
     target_courses: Optional[list[str]] = None,
+    version: str = "v1",
 ) -> TJAResult:
     """Process a single TJA file and return results for all courses."""
     relative_path = os.path.relpath(file_path, base_dir)
@@ -243,6 +246,7 @@ def process_tja_file(
                     window_measures=window_measures,
                     hop_measures=hop_measures,
                     max_instances=max_instances,
+                    version=version,
                 )
                 course_results.append(result)
             except Exception as e:
@@ -717,6 +721,13 @@ def main():
         default=None,
         help=f"Comma-separated columns to hide in the report. Available: {', '.join(REPORT_COLUMNS)}",
     )
+    parser.add_argument(
+        "--version",
+        type=str,
+        default="v1",
+        choices=["v1", "v2"],
+        help="Model version (v1/v2)",
+    )
 
     args = parser.parse_args()
 
@@ -846,33 +857,42 @@ def main():
     # Load model
     print(f"Loading model from: {checkpoint_path}")
     device = _resolve_device(args.device)
-    model = _load_model(checkpoint_path, device)
+    model_inst = _load_model(checkpoint_path, device=device, version=args.version)
+    max_tokens = int(getattr(model_inst.config, "max_seq_len", 128))
     print(f"Model loaded on device: {device}")
 
     # Process files
     results = []
+    import time
+
+    t0 = time.time()
     seen_titles: set[str] = set()
     skipped_duplicates = 0
 
-    for i, file_path in enumerate(tja_files, 1):
+    for i, file_path in enumerate(tja_files):
+        # Progress
+        if (i + 1) % 10 == 0:
+            sys.stderr.write(f"\rProcessing {i + 1}/{len(tja_files)}...")
+
         relative = os.path.relpath(file_path, args.directory)
-        print(f"[{i}/{len(tja_files)}] Processing: {relative}")
+        # print(f"[{i+1}/{len(tja_files)}] Processing: {relative}") # Removed for progress bar
 
         result = process_tja_file(
             file_path=file_path,
             base_dir=args.directory,
-            model=model,
+            model=model_inst,
             device=device,
             window_measures=window_measures,
             hop_measures=args.hop_measures,
             max_instances=args.max_instances,
             target_courses=target_courses,
+            version=args.version,
         )
 
         # Deduplication by title
         if args.dedup and result.title:
             if result.title in seen_titles:
-                print(f"  ⏭️ Skipped (duplicate title: {result.title})")
+                # print(f"  ⏭️ Skipped (duplicate title: {result.title})") # Removed for progress bar
                 skipped_duplicates += 1
                 continue
             seen_titles.add(result.title)
